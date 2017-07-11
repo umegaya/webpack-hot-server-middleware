@@ -2,7 +2,7 @@
 
 const debug = require('debug')('webpack-hot-server-middleware');
 const path = require('path');
-const requireFromString = require('require-from-string');
+const vm = require('vm');
 const MultiCompiler = require('webpack/lib/MultiCompiler');
 const sourceMapSupport = require('source-map-support');
 
@@ -13,14 +13,6 @@ const DEFAULTS = {
 
 function interopRequireDefault(obj) {
     return obj && obj.__esModule ? obj.default : obj;
-}
-
-function findCompiler(multiCompiler, name) {
-    return multiCompiler.compilers.find(compiler => compiler.name === name);
-}
-
-function findStats(multiStats, name) {
-    return multiStats.stats.find(stats => stats.compilation.name === name);
 }
 
 function getFilename(serverStats, outputPath, chunkName) {
@@ -40,7 +32,7 @@ function getServerRenderer(filename, buffer, options) {
     const errMessage = `The 'server' compiler must export a function in the form of \`(options) => (req, res, next) => void\``;
 
     let serverRenderer = interopRequireDefault(
-        requireFromString(buffer.toString(), filename)
+        vm.runInThisContext(buffer.toString())
     );
     if (typeof serverRenderer !== 'function') {
         throw new Error(errMessage);
@@ -79,50 +71,30 @@ function installSourceMapSupport(fs) {
  * @options {Object}        options.serverRendererOptions  Options passed to the `serverRenderer`.
  * @return  {Function}                                     Middleware fn.
  */
-function webpackHotServerMiddleware(multiCompiler, options) {
+function webpackHotServerMiddleware(compiler, options) {
     debug('Using webpack-hot-server-middleware');
 
     options = Object.assign({}, DEFAULTS, options);
 
-    if (!(multiCompiler instanceof MultiCompiler)) {
-        throw new Error(`Expected webpack compiler to contain both a 'client' and 'server' config`);
-    }
-
-    const serverCompiler = findCompiler(multiCompiler, 'server');
-    const clientCompiler = findCompiler(multiCompiler, 'client');
-
-    if (!serverCompiler) {
-        throw new Error(`Expected a webpack compiler named 'server'`);
-    }
-    if (!clientCompiler) {
-        throw new Error(`Expected a webpack compiler named 'client'`);
-    }
-
-    const outputFs = serverCompiler.outputFileSystem;
-    const outputPath = serverCompiler.outputPath;
+    const outputFs = compiler.outputFileSystem;
+    const outputPath = compiler.outputPath;
 
     installSourceMapSupport(outputFs);
 
     let serverRenderer;
     let error = false;
 
-    multiCompiler.plugin('done', multiStats => {
+    compiler.plugin('done', stats => {
         error = false;
-        const clientStats = findStats(multiStats, 'client');
-        const serverStats = findStats(multiStats, 'server');
         // Server compilation errors need to be propagated to the client.
-        if (serverStats.compilation.errors.length) {
-            error = serverStats.compilation.errors[0];
+        if (stats.compilation.errors.length) {
+            error = stats.compilation.errors[0];
             return;
         }
-        const filename = getFilename(serverStats, outputPath, options.chunkName);
+        const filename = getFilename(stats, outputPath, options.chunkName);
         const buffer = outputFs.readFileSync(filename);
-        const serverRendererOptions = Object.assign({
-            clientStats: clientStats.toJson(),
-            serverStats: serverStats.toJson()
-        }, options.serverRendererOptions);
         try {
-            serverRenderer = getServerRenderer(filename, buffer, serverRendererOptions);
+            serverRenderer = getServerRenderer(filename, buffer, options);
         } catch (ex) {
             debug(ex);
             error = ex;
